@@ -364,7 +364,8 @@ def line_search(problem, dofs, inc):
 
 def get_A(problem):
     logger.debug(f"Creating sparse matrix with scipy...")
-    A_sp_scipy = scipy.sparse.csr_array((onp.array(problem.V), (problem.I, problem.J)),
+    V_data = onp.array(problem.V)
+    A_sp_scipy = scipy.sparse.csr_array((V_data, (problem.I, problem.J)),
         shape=(problem.num_total_dofs_all_vars, problem.num_total_dofs_all_vars))
     # logger.info(f"Global sparse matrix takes about {A_sp_scipy.data.shape[0]*8*3/2**30} G memory to store.")
 

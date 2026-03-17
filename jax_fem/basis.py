@@ -114,6 +114,133 @@ def get_elements(ele_type):
     return element_family, basix_ele, basix_face_ele, gauss_order, degree, re_order
 
 
+def get_nedelec_elements(ele_type):
+    """Obtain Nédélec (edge) element information for H(curl)-conforming finite elements.
+
+    These elements associate degrees of freedom with mesh edges (and faces for
+    higher order) instead of nodes.  They are required for high-frequency
+    electromagnetic simulations to avoid spurious modes.
+
+    Parameters
+    ----------
+    ele_type : str
+        Element type.  Currently supported: ``'TET4'``, ``'HEX8'``, ``'TRI3'``, ``'QUAD4'``.
+
+    Returns
+    -------
+    basix_ele : BasixObject
+        Basix ``CellType``.
+    basix_face_ele : BasixObject
+        Basix ``CellType`` for the element face.
+    gauss_order : int
+        Default Gauss quadrature order.
+    degree : int
+        Polynomial degree of the Nédélec element (always 1 for lowest order).
+    """
+    degree = 1
+    if ele_type == 'TET4':
+        basix_ele = basix.CellType.tetrahedron
+        basix_face_ele = basix.CellType.triangle
+        gauss_order = 2
+    elif ele_type == 'HEX8':
+        basix_ele = basix.CellType.hexahedron
+        basix_face_ele = basix.CellType.quadrilateral
+        gauss_order = 2
+    elif ele_type == 'TRI3':
+        basix_ele = basix.CellType.triangle
+        basix_face_ele = basix.CellType.interval
+        gauss_order = 2
+    elif ele_type == 'QUAD4':
+        basix_ele = basix.CellType.quadrilateral
+        basix_face_ele = basix.CellType.interval
+        gauss_order = 2
+    else:
+        raise NotImplementedError(f"Nédélec elements not implemented for {ele_type}")
+
+    return basix_ele, basix_face_ele, gauss_order, degree
+
+
+def get_edge_shape_vals_and_curls(ele_type, gauss_order=None):
+    """Compute Nédélec (edge) shape function values and their curls on the reference element.
+
+    Parameters
+    ----------
+    ele_type : str
+        Element type (e.g. ``'TET4'``, ``'HEX8'``).
+    gauss_order : int, optional
+        Override for the default quadrature order.
+
+    Returns
+    -------
+    shape_values : ndarray
+        Shape ``(num_quads, num_edge_dofs, dim)`` – vector-valued basis functions.
+    shape_curls_ref : ndarray
+        In 3-D, shape ``(num_quads, num_edge_dofs, dim)`` – curl of each basis function.
+        In 2-D, shape ``(num_quads, num_edge_dofs)`` – scalar curl (z-component).
+    weights : ndarray
+        Quadrature weights, shape ``(num_quads,)``.
+    edge_vertices : ndarray
+        Vertex indices defining each edge, shape ``(num_edges, 2)``.
+    """
+    basix_ele, basix_face_ele, gauss_order_default, degree = get_nedelec_elements(ele_type)
+
+    if gauss_order is None:
+        gauss_order = gauss_order_default
+
+    quad_points, weights = basix.make_quadrature(basix_ele, gauss_order)
+    element = basix.create_element(basix.ElementFamily.N1E, basix_ele, degree)
+
+    dim = quad_points.shape[1]
+    # tabulate(1, points) -> (nderivs, num_quads, num_dofs, value_size)
+    # nderivs = 1 + dim  (values + partial derivatives w.r.t. each coordinate)
+    vals_and_grads = element.tabulate(1, quad_points)
+
+    # Index 0: shape function values  (num_quads, num_dofs, dim)
+    shape_values = vals_and_grads[0]
+
+    # Compute curl from partial derivatives
+    if dim == 3:
+        # vals_and_grads[1] = d/dx, vals_and_grads[2] = d/dy, vals_and_grads[3] = d/dz
+        dNdx = vals_and_grads[1]  # (num_quads, num_dofs, 3)
+        dNdy = vals_and_grads[2]
+        dNdz = vals_and_grads[3]
+        # curl_x = dNz/dy - dNy/dz
+        # curl_y = dNx/dz - dNz/dx
+        # curl_z = dNy/dx - dNx/dy
+        curl_x = dNdy[:, :, 2] - dNdz[:, :, 1]
+        curl_y = dNdz[:, :, 0] - dNdx[:, :, 2]
+        curl_z = dNdx[:, :, 1] - dNdy[:, :, 0]
+        shape_curls_ref = onp.stack([curl_x, curl_y, curl_z], axis=-1)
+    elif dim == 2:
+        # 2D curl is scalar: curl_z = dNy/dx - dNx/dy
+        dNdx = vals_and_grads[1]  # (num_quads, num_dofs, 2)
+        dNdy = vals_and_grads[2]
+        shape_curls_ref = dNdx[:, :, 1] - dNdy[:, :, 0]  # (num_quads, num_dofs)
+    else:
+        raise ValueError(f"Unsupported dimension {dim}")
+
+    # Edge vertex connectivity from basix topology (in basix vertex ordering).
+    # Our mesh cells use Abaqus ordering (via the re_order mapping from get_elements).
+    # We must map basix vertex indices → Abaqus positions so that
+    # cells[:, edge_vertices[:, k]] returns the correct global node.
+    edge_topology = basix.topology(basix_ele)[1]
+    edge_vertices_basix = onp.array(edge_topology)
+
+    _, _, _, _, _, re_order = get_elements(ele_type)
+    re_order = onp.array(re_order)
+
+    # inv_re_order[basix_vertex] = abaqus_position
+    inv_re_order = onp.empty_like(re_order)
+    inv_re_order[re_order] = onp.arange(len(re_order))
+
+    edge_vertices = inv_re_order[edge_vertices_basix]
+
+    logger.debug(f"Nédélec ele_type = {ele_type}, quad_points.shape = {quad_points.shape}, "
+                 f"num_edge_dofs = {shape_values.shape[1]}")
+
+    return shape_values, shape_curls_ref, weights, edge_vertices
+
+
 def reorder_inds(inds, re_order):
     """Apply re-ordering transformation for node indices.
     """
