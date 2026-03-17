@@ -377,18 +377,29 @@ def compute_cavity_eigenvalues(edge_fe, mu_r=1.0, eps_r=1.0, num_modes=6,
         sigma_shift = 10.0
 
     # Request extra modes to skip the gradient null-space (dimension ~ number
-    # of interior vertices).  Over-request to ensure we capture enough physical modes.
-    num_request = min(num_modes + 200, num_free - 1)
+    # of interior vertices).  Cap the request to avoid ARPACK convergence issues.
+    # The null space dimension equals approximately the number of interior mesh
+    # vertices, so we need at least that many extra modes.
+    num_request = num_modes + 200
+    # ARPACK requires k < n and works best when k < n/2
+    max_request = max(num_free // 2, num_modes + 1)
+    num_request = min(num_request, max_request)
+    num_request = min(num_request, num_free - 2)
+
     logger.info(f"Solving eigenvalue problem for {num_request} modes "
                 f"(sigma={sigma_shift}, free DOFs={num_free})...")
     try:
         eigenvalues, eigenvectors = scipy.sparse.linalg.eigsh(
-            S_free, k=num_request, M=M_free, sigma=sigma_shift, which='LM'
+            S_free, k=num_request, M=M_free, sigma=sigma_shift, which='LM',
+            ncv=min(2 * num_request + 1, num_free)
         )
     except scipy.sparse.linalg.ArpackNoConvergence as e:
         logger.warning(f"ARPACK did not fully converge: {e}")
         eigenvalues = e.eigenvalues
         eigenvectors = e.eigenvectors
+    except Exception as e:
+        logger.warning(f"Eigenvalue solver error: {e}")
+        return onp.array([]), onp.array([])
 
     # Sort by eigenvalue
     sort_idx = onp.argsort(eigenvalues)
