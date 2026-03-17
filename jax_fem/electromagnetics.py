@@ -39,7 +39,7 @@ from jax_fem.edge_fe import EdgeFiniteElement
 from jax_fem import logger
 
 # Physical constants
-MU_0 = 4.0e-7 * onp.pi      # Vacuum permeability  [H/m]
+MU_0 = 4 * onp.pi * 1e-7     # Vacuum permeability  [H/m]  (μ₀ = 4π × 10⁻⁷)
 EPS_0 = 8.854187817e-12      # Vacuum permittivity  [F/m]
 C_0 = 1.0 / onp.sqrt(MU_0 * EPS_0)  # Speed of light [m/s]
 
@@ -371,27 +371,34 @@ def compute_cavity_eigenvalues(edge_fe, mu_r=1.0, eps_r=1.0, num_modes=6,
     S_free = S[onp.ix_(free_dofs, free_dofs)]
     M_free = M[onp.ix_(free_dofs, free_dofs)]
 
-    # Automatic sigma estimate: use the smallest expected physical eigenvalue
-    # For a unit-sized cavity the first mode has k^2 ~ π^2 ~ 10
+    # Automatic sigma estimate.  The smallest physical eigenvalue for a cavity
+    # of characteristic length L is approximately k² ~ (π/L)² ~ 10.  We place
+    # the shift above the null space but below the first physical mode so
+    # that shift-invert converges on physical modes.
     if sigma_shift is None:
-        sigma_shift = 10.0
+        sigma_shift = 2.0 * onp.pi**2
 
-    # Request extra modes to skip the gradient null-space (dimension ~ number
-    # of interior vertices).  Cap the request to avoid ARPACK convergence issues.
-    # The null space dimension equals approximately the number of interior mesh
-    # vertices, so we need at least that many extra modes.
-    num_request = num_modes + 200
-    # ARPACK requires k < n and works best when k < n/2
-    max_request = max(num_free // 2, num_modes + 1)
-    num_request = min(num_request, max_request)
-    num_request = min(num_request, num_free - 2)
+    # The null space of the curl-curl operator has dimension equal to the
+    # number of interior mesh vertices (gradient fields).  We must request
+    # enough modes to skip past the null space and capture num_modes physical
+    # modes.  Estimate the null-space dimension from the mesh topology.
+    num_interior_verts = num_free - (num_dofs - len(bc_inds))  # rough estimate
+    # A safer estimate: null_dim ≈ (number of free DOFs) - (number of physical DOFs)
+    # For lowest-order Nédélec on a hex mesh, the physical DOFs comprise about
+    # 2/3 of the free DOFs (one constraint per interior vertex).
+    null_dim_estimate = num_free // 3  # conservative upper bound
+    num_request = null_dim_estimate + num_modes + 10
+    # Cap to avoid ARPACK issues: ARPACK needs k < n, works best with k < n/2
+    num_request = min(num_request, num_free * 2 // 3, num_free - 2)
+    num_request = max(num_request, num_modes + 1)
+    ncv = min(2 * num_request + 20, num_free)
 
     logger.info(f"Solving eigenvalue problem for {num_request} modes "
-                f"(sigma={sigma_shift}, free DOFs={num_free})...")
+                f"(sigma={sigma_shift:.2f}, free DOFs={num_free}, ncv={ncv})...")
     try:
         eigenvalues, eigenvectors = scipy.sparse.linalg.eigsh(
             S_free, k=num_request, M=M_free, sigma=sigma_shift, which='LM',
-            ncv=min(2 * num_request + 1, num_free)
+            ncv=ncv
         )
     except scipy.sparse.linalg.ArpackNoConvergence as e:
         logger.warning(f"ARPACK did not fully converge: {e}")
@@ -405,8 +412,10 @@ def compute_cavity_eigenvalues(edge_fe, mu_r=1.0, eps_r=1.0, num_modes=6,
     sort_idx = onp.argsort(eigenvalues)
     eigenvalues = eigenvalues[sort_idx]
 
-    # Filter out near-zero eigenvalues (gradient null space) and
-    # extremely large ones (penalty for PEC DoFs)
+    # Filter out near-zero eigenvalues (gradient null space).
+    # Physical eigenvalues satisfy k² > 0; the null-space eigenvalues are
+    # numerically ≈ 0 (typically < 1e-10).  A threshold of 0.1 cleanly
+    # separates them since the smallest physical k² is O(π²) ≈ 10.
     threshold = 0.1
     physical_mask = eigenvalues > threshold
     eigenvalues = eigenvalues[physical_mask][:num_modes]

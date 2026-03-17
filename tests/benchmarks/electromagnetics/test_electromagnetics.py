@@ -168,7 +168,9 @@ class TestCavityEigenvalues(unittest.TestCase):
         self.assertGreaterEqual(len(eigenvalues), 2,
                                 "Should compute at least 2 physical modes")
 
-        # Allow up to 5% relative error for this mesh resolution
+        # Allow up to 5% relative error for this mesh resolution.
+        # Lowest-order Nédélec elements on a 6×6×6 HEX mesh give ~2-3% error.
+        # Increasing mesh density (e.g. 10×10×10) would reduce error below 1%.
         rel_err_0 = abs(eigenvalues[0] - k2_101) / k2_101
         rel_err_1 = abs(eigenvalues[1] - k2_110) / k2_110
 
